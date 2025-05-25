@@ -18,6 +18,7 @@ import omni.ui as ui
 import omni.usd
 from isaacsim.gui.components.element_wrappers import ScrollingWindow
 from isaacsim.gui.components.menu import MenuItemDescription
+from isaacsim.core.utils import extensions
 from omni.kit.menu.utils import add_menu_items, remove_menu_items
 from omni.usd import StageEventType
 
