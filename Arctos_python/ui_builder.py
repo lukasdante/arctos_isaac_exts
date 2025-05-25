@@ -40,7 +40,9 @@ class UIBuilder:
         # Get access to the timeline to control stop/pause/play programmatically
         self._timeline = omni.timeline.get_timeline_interface()
 
+        self._manual_time = 0.0
 
+        self.plot: XYPlot = None
 
         # Run initialization for the provided example
         self._on_init()
@@ -82,43 +84,9 @@ class UIBuilder:
         Args:
             step (float): Size of physics step
         """
-        if not self._reaching:
-            return
-        
-        # 1) collect state, get actions, apply them…
-        state = self.collect_state()
-        with torch.no_grad():
-            actions = self.model(state)[0]
-        # apply to joints…
-        self.last_actions = actions
-
-        # Actuate the simulation and the motors
-        
-        for i in range(3):
-            field = self._joint_position_float_fields[i]
-
-            # The policy outputs relative joint positions, so add the current joint position to it
-            position = actions[i].item()
-            field.set_value(position)
-
-            robot_action = ArticulationAction(
-                joint_positions=np.array([position]),
-                joint_velocities=np.array([0]),
-                joint_indices=np.array([i]),
-            )
-        
-            self.articulation.apply_action(robot_action)
-        
-        # 2) compute error
-        err = torch.norm(
-            torch.tensor(self.get_prim_transformation("/World/arctos/right_jaw")[0]) -
-            torch.tensor(self.get_prim_transformation("/World/Box")[0]),
-            p=2
-        )
-
-        if err <= self._target_tolerance:
-            self._reaching = False
-        pass
+        self._manual_time += step
+        self.update_plot()
+        self.act_reach_policy()
 
     def on_stage_event(self, event):
         """Callback for Stage Events
@@ -172,7 +140,6 @@ class UIBuilder:
                     tooltip="Select from Articulations found on the stage after the timeline has been played.",
                     on_selection_fn=self._on_articulation_selection,
                     keep_old_selections=True,
-                    # populate_fn = self._find_all_articulations # Equivalent functionality to one-liner below
                 )
                 # This sets the populate_fn to find all USD objects of a certain type on the stage, overriding the populate_fn arg
                 # Figure out the type of an object with get_prim_object_type(prim_path)
@@ -212,8 +179,8 @@ class UIBuilder:
                 
                 self._max_joint_velocity_adjustment_menu.set_build_fn(build_configuration_max_velocity_menu_fn)
 
-
-        
+ 
+        # RL Control Frame
         self._robot_input_frame = CollapsableFrame("RL Control", collapsed=True, enabled=False)
 
         def build_robot_input_frame_fn():
@@ -226,13 +193,11 @@ class UIBuilder:
                 reach_target_button = Button(label="Reach Target",
                                              text="Reach",
                                              tooltip="Reach the target using the RL policy.",
-                                             on_click_fn=self._on_reach_target_btn_click_fn)
+                                             on_click_fn=self._on_reach_target_button_click_fn)
                 
-
         self._robot_input_frame.set_build_fn(build_robot_input_frame_fn)
 
-        
-        
+        # Per Joint Control Frame
         self._robot_control_frame = CollapsableFrame("Per Joint Control", collapsed=True, enabled=False)
 
         def build_robot_control_frame_fn():
@@ -269,21 +234,34 @@ class UIBuilder:
                                               tooltip="Publish joint state to ROS 2",
                                               on_click_fn=self._on_publish_button_click_fn)
                 
-                save_action_button = Button(label="Save Positions",
-                                            text="Save",
-                                            tooltip="Save joint positions to XML file.",
-                                            on_click_fn=self._on_save_action_button_click_fn)
-                
-                load_action_button = Button(label="Load Positions",
-                                            text="Load",
-                                            tooltip="Load joint positions from XML file.",
-                                            on_click_fn=self._on_load_action_button_click_fn)
+                save_and_load_frame = CollapsableFrame("Save and Load", collapsed=False, enabled=True)
+
+                def save_and_load_frame_build_fn():
+                    with ui.VStack(style=get_style(), spacing=5, height=0):
+                        self.save_action_name_field = StringField(label="Action Filename", tooltip="Filename of the action.")
+                        save_action_button = Button(label="Save Positions",
+                                                text="Save",
+                                                tooltip="Save joint positions to XML file.",
+                                                on_click_fn=self._on_save_action_button_click_fn)
+                        self.action_selection_menu = DropDown(
+                            "Select Action",
+                            tooltip="Select from Actions saved.",
+                            keep_old_selections=True,
+                            populate_fn = self._find_all_saved_actions
+                        )
+                        self.action_selection_menu.repopulate()
+                        load_action_button = Button(label="Load Positions",
+                                                text="Load",
+                                                tooltip="Load joint positions from XML file.",
+                                                on_click_fn=self._on_load_action_button_click_fn)
+
+                save_and_load_frame.set_build_fn(save_and_load_frame_build_fn)
 
             self._setup_joint_control_frames()
         
         self._robot_control_frame.set_build_fn(build_robot_control_frame_fn)
 
-
+        # Robot Logs Frame
         self._robot_logs_frame = CollapsableFrame("Logs", collapsed=True, enabled=False)
 
         def build_robot_logs_frame():
@@ -298,7 +276,7 @@ class UIBuilder:
 
         self._robot_logs_frame.set_build_fn(build_robot_logs_frame)
 
-
+        # Robot Plots Frame
         self._robot_plots_frame = CollapsableFrame("Plots", collapsed=True, enabled=False)
 
         def build_robot_plots_frame():
@@ -308,19 +286,19 @@ class UIBuilder:
 
                     x = np.arange(-1, 6.01, 0.01)
                     y = np.sin((x - 0.5) * np.pi)
-                    plot = XYPlot(
-                        "",
+                    self.plot = XYPlot(
+                        "Real-Time Joint Data",
                         tooltip="Press mouse over the plot for data label",
-                        x_data=[x[:300], x[100:400], x[200:]],
-                        y_data=[y[:300], y[100:400], y[200:]],
+                        x_data=[x[:300], x[100:400], x[200:], x[200:], x[200:], x[200:], x[200:], x[200:]],
+                        y_data=[y[:300], y[100:400], y[200:], y[200:], y[200:], y[200:], y[200:], y[200:]],
                         x_min=None,  # Use default behavior to fit plotted data to entire frame
                         x_max=None,
-                        y_min=-3.14,
-                        y_max=3.14,
-                        x_label="Time (s)",
+                        y_min=-math.pi,
+                        y_max=math.pi,
+                        x_label="Time (t)",
                         y_label="Joint position (rad)",
                         plot_height=10,
-                        legends=["x_joint", "y_joint", "z_joint"],
+                        legends=[name.split("_")[0] for name in self.articulation.dof_names],
                         show_legend=True,
                         plot_colors=[
                             [255, 0, 0],
@@ -328,7 +306,6 @@ class UIBuilder:
                             [0, 100, 200],
                         ],  # List of [r,g,b] values; not necessary to specify
                     )
-            pass
 
         self._robot_plots_frame.set_build_fn(build_robot_plots_frame)
 
@@ -359,11 +336,14 @@ class UIBuilder:
         self.model = torch.jit.load(model_path, map_location=self.device)
         self.model.eval()
 
-        # Initialize last actions for RL state collection
+        # Initialize RL configs
         self.last_actions = torch.tensor([0.0, 0.0, 0.0], device=self.device)
-
         self._reaching = False
         self._target_tolerance = 0.01
+
+        # Plot variables
+        self.time_history = []
+        self.joint_position_history = [[] for _ in range(8)]
 
     def _robot_input_impulse(self, times=1):
         for i in range(times):
@@ -431,6 +411,10 @@ class UIBuilder:
         self._enable_articulation()
         self._robot_control_frame.rebuild()
         self._max_joint_velocity_adjustment_menu.rebuild()
+        print(self.articulation.dof_names)
+        # self.plot.set_legends(legends=[name for name in self.articulation.dof_names])
+        # self.plot.set_show_legend(True)
+        self._robot_plots_frame.rebuild()
 
     def _setup_max_joint_velocity_frame(self):
         num_dof = self.articulation.num_dof
@@ -469,6 +453,22 @@ class UIBuilder:
             field.set_upper_limit(upper_joint_limits[i])
             field.set_lower_limit(lower_joint_limits[i])
 
+    def add_message_to_log(self, message_body: str, message: str):
+        if message_body is self.ros2_messages:
+            self.ros2_messages += message
+            self._ros2_messages_field.set_text(self.ros2_messages)
+        if message_body is self.llm_messages:
+            self.llm_messages += message
+            self._llm_messages_field.set_text(self.llm_messagesros2_messages)
+        if message_body is self.isaac_sim_messages:
+            self.isaac_sim_messages += message
+            self._isaac_sim_messages_field.set_text(self.isaac_sim_messages)
+                 
+
+    ######################################################################################
+    # Functions Below This Point Are for UI Callbacks
+    ######################################################################################
+    
     def _on_set_joint_position_target(self, joint_index: int, position_target: float):
         """
         This function is called when the user changes one of the float fields
@@ -543,6 +543,12 @@ class UIBuilder:
         if action == "close":
             pass
 
+    def _on_publish_button_click_fn(self):
+        og.Controller.set(
+                    og.Controller.attribute("/World/ActionGraph/joint_state_impulse.state:enableImpulse"),
+                    True
+                )
+    
     def _on_submit_btn_click_fn(self):
         robot_input = self._input_field.get_value()
 
@@ -552,23 +558,89 @@ class UIBuilder:
         
         self._input_field.set_value("")
 
-    def add_message_to_log(self, message_body: str, message: str):
-        if message_body is self.ros2_messages:
-            self.ros2_messages += message
-            self._ros2_messages_field.set_text(self.ros2_messages)
-        if message_body is self.llm_messages:
-            self.llm_messages += message
-            self._llm_messages_field.set_text(self.llm_messagesros2_messages)
-        if message_body is self.isaac_sim_messages:
-            self.isaac_sim_messages += message
-            self._isaac_sim_messages_field.set_text(self.isaac_sim_messages)
-                 
-    def _on_publish_button_click_fn(self):
-        og.Controller.set(
-                    og.Controller.attribute("/World/ActionGraph/joint_state_impulse.state:enableImpulse"),
-                    True
+    def _on_reach_target_button_click_fn(self):
+        self._reaching = True
+
+    def _on_save_action_button_click_fn(self):
+    # Prepare directory
+        save_dir = Path(__file__).parent / "saved_actions"
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        # Random filename
+        action_name = '_'.join(self.save_action_name_field.get_value().split(' '))
+        filename = action_name + ".xml"
+        filepath = save_dir / filename
+
+        # Build raw XML string
+        xml_data = "<joints>\n"
+        for i in range(self.articulation.num_dof):
+            joint_name = self.articulation.dof_names[i]
+            joint_value = self._joint_position_float_fields[i].get_value()
+            xml_data += f"  <{joint_name}>{joint_value}</{joint_name}>\n"
+        xml_data += "</joints>"
+
+        # Write to file
+        with open(filepath, "w", encoding="utf-8") as f:
+            f.write(xml_data)
+
+        self.action_selection_menu.repopulate()
+
+        print(f"Saved actions to {filepath}")
+        
+    def _find_all_saved_actions(self):
+        saved_dir = Path(__file__).parent / "saved_actions"
+        saved_dir.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+
+        # Collect all .xml files in the directory
+        saved_files = [f.stem for f in saved_dir.glob("*.xml") if f.is_file()]
+
+        return sorted(saved_files)  # Return sorted list of action names
+
+    def _on_load_action_button_click_fn(self):
+        import xml.etree.ElementTree as ET
+
+        # Get selected action name from dropdown
+        selected_action = self.action_selection_menu.get_selection()
+        if not selected_action:
+            print("No action selected.")
+            return
+
+        filepath = Path(__file__).parent / "saved_actions" / f"{selected_action}.xml"
+
+        # Check if file exists
+        if not filepath.exists():
+            print(f"File not found: {filepath}")
+            return
+
+        # Parse XML
+        tree = ET.parse(filepath)
+        root = tree.getroot()
+
+        # Apply joint values to UI fields and simulation
+        for i in range(self.articulation.num_dof):
+            joint_name = self.articulation.dof_names[i]
+            joint_elem = root.find(joint_name)
+
+            if joint_elem is not None:
+                value = float(joint_elem.text)
+
+                # Update UI field
+                self._joint_position_float_fields[i].set_value(value)
+
+                # Send command to the articulation
+                action = ArticulationAction(
+                    joint_positions=np.array([value]),
+                    joint_velocities=np.array([0]),
+                    joint_indices=np.array([i]),
                 )
-    
+                self.articulation.apply_action(action)
+            else:
+                print(f"Joint {joint_name} not found in XML.")
+
+    ######################################################################################
+    # Functions Below This Point Are for Physics Stepping
+    ######################################################################################
+
     def get_prim_transformation(self, prim_path):
 
         stage = omni.usd.get_context().get_stage()
@@ -591,12 +663,15 @@ class UIBuilder:
             return translation, rotation
 
     def collect_state(self, position_only=True):
+        if not self.articulation:
+            return
+    
         current_joint_position = self.articulation.get_joint_positions()
 
         state_joint_position = torch.tensor(current_joint_position, device=self.device)
 
         # collect pose
-        translation, rotation = self.get_prim_transformation("/World/Box")
+        translation, rotation = self.get_prim_transformation("/World/Targets/Box")
 
         if position_only:
             pose = [translation[i] for i in range(len(translation))] + [1.0, 0.0, 0.0, 0.0]
@@ -611,47 +686,59 @@ class UIBuilder:
 
         return state
 
-    def _on_reach_target_btn_click_fn(self):
-        self._reaching = True
+    def act_reach_policy(self):
 
-    def _on_save_action_button_click_fn(self):
-        # Prepare directory
-        save_dir = Path(__file__).parent / "saved_actions"
-        save_dir.mkdir(parents=True, exist_ok=True)
-
-        # Random filename
-        filename = "hello" + ".xml"
-        filepath = save_dir / filename
-
-        # Build raw XML string
-        xml_data = "<joints>\n"
-        for i in range(self.articulation.num_dof):
-            joint_name = self.articulation.dof_names[i]
-            joint_value = self._joint_position_float_fields[i].get_value()
-            xml_data += f"  <{joint_name}>{joint_value}</{joint_name}>\n"
-        xml_data += "</joints>"
-
-        # Write to file
-        with open(filepath, "w", encoding="utf-8") as f:
-            f.write(xml_data)
-
-        print(f"Saved actions to {filepath}")
-
-    def _on_load_action_button_click_fn(self):
+        if not self._reaching:
+            return
         
+        # 1) collect state, get actions, apply them…
+        state = self.collect_state()
+        with torch.no_grad():
+            actions = self.model(state)[0]
+        # apply to joints…
+        self.last_actions = actions
 
-    # def _find_all_articulations(self):
-    # #    Commented code left in to help a curious user gain a thorough understanding
+        # Actuate the simulation and the motors
+        
+        for i in range(3):
+            field = self._joint_position_float_fields[i]
 
-        #     import omni.usd
-        #     from pxr import Usd
-        #     items = []
-        #     stage = omni.usd.get_context().get_stage()
-        #     if stage:
-        #         for prim in Usd.PrimRange(stage.GetPrimAtPath("/")):
-        #             path = str(prim.GetPath())
-        #             # Get prim type get_prim_object_type
-        #             type = get_prim_object_type(path)
-        #             if type == "articulation":
-        #                 items.append(path)
-        #     return items
+            # The policy outputs relative joint positions, so add the current joint position to it
+            position = actions[i].item()
+            field.set_value(position)
+
+            robot_action = ArticulationAction(
+                joint_positions=np.array([position]),
+                joint_velocities=np.array([0]),
+                joint_indices=np.array([i]),
+            )
+        
+            self.articulation.apply_action(robot_action)
+        
+        # 2) compute error
+        err = torch.norm(
+            torch.tensor(self.get_prim_transformation("/World/arctos/gripper_assembly_outer")[0]) -
+            torch.tensor(self.get_prim_transformation("/World/Targets/Box")[0]),
+            p=2
+        )
+
+        print("Error:", err)
+
+        # if err <= self._target_tolerance:
+        #     self._reaching = False
+
+    def update_plot(self):
+        if not self.plot or not self.articulation:
+            return
+        
+        t = self._manual_time
+        self.time_history.append(t)
+        joint_positions = self.articulation.get_joint_positions()
+
+        for i, value in enumerate(joint_positions):
+            self.joint_position_history[i].append(value)
+
+        self.plot.set_data(
+            x_data=[self.time_history] * len(self.joint_position_history),
+            y_data=self.joint_position_history
+        )

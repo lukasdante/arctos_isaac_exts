@@ -1,0 +1,10 @@
+<joints>
+  <x_joint>1.4538231729588347e-12</x_joint>
+  <y_joint>3.0595331823590755e-10</y_joint>
+  <z_joint>1.7748175151766077e-10</z_joint>
+  <a_joint>9.728392570684807e-12</a_joint>
+  <b_joint>-5.039759165548219e-10</b_joint>
+  <c_joint>1.2459131816522362e-11</c_joint>
+  <g_right>7.785138636182132e-13</g_right>
+  <g_left>-3.807152509915923e-12</g_left>
+</joints>
