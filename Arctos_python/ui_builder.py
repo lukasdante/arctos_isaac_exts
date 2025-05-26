@@ -15,16 +15,17 @@ from pathlib import Path
 import omni.timeline
 import omni.ui as ui
 import omni.usd
-from pxr import Usd, Sdf, UsdGeom
+from pxr import Usd, Sdf, UsdGeom, UsdPhysics
 from isaacsim.core.prims import SingleArticulation
 from isaacsim.core.utils.prims import get_prim_object_type
 from isaacsim.core.utils.types import ArticulationAction, ArticulationActions
-from isaacsim.core.utils.stage import add_reference_to_stage
+from isaacsim.core.utils.stage import add_reference_to_stage, get_current_stage
 from isaacsim.core.utils import extensions
 from isaacsim.gui.components.element_wrappers import (
     CollapsableFrame, DropDown, FloatField, TextBlock, StateButton, Button, StringField, XYPlot)
 from isaacsim.gui.components.ui_utils import get_style
 from isaacsim.storage.native.nucleus import get_assets_root_path
+
 import omni.graph.core as og
 from .model import GaussianPolicy
 import torch
@@ -85,7 +86,6 @@ class UIBuilder:
             step (float): Size of physics step
         """
         self._manual_time += step
-        self.update_plot()
         self.act_reach_policy()
 
     def on_stage_event(self, event):
@@ -178,6 +178,7 @@ class UIBuilder:
                     self._setup_max_joint_velocity_frame()
                 
                 self._max_joint_velocity_adjustment_menu.set_build_fn(build_configuration_max_velocity_menu_fn)
+
 
  
         # RL Control Frame
@@ -276,40 +277,6 @@ class UIBuilder:
 
         self._robot_logs_frame.set_build_fn(build_robot_logs_frame)
 
-        # Robot Plots Frame
-        self._robot_plots_frame = CollapsableFrame("Plots", collapsed=True, enabled=False)
-
-        def build_robot_plots_frame():
-            with self._robot_plots_frame:
-                with ui.VStack(style=get_style(), spacing=5, height=0):
-                    import numpy as np
-
-                    x = np.arange(-1, 6.01, 0.01)
-                    y = np.sin((x - 0.5) * np.pi)
-                    self.plot = XYPlot(
-                        "Real-Time Joint Data",
-                        tooltip="Press mouse over the plot for data label",
-                        x_data=[x[:300], x[100:400], x[200:], x[200:], x[200:], x[200:], x[200:], x[200:]],
-                        y_data=[y[:300], y[100:400], y[200:], y[200:], y[200:], y[200:], y[200:], y[200:]],
-                        x_min=None,  # Use default behavior to fit plotted data to entire frame
-                        x_max=None,
-                        y_min=-math.pi,
-                        y_max=math.pi,
-                        x_label="Time (t)",
-                        y_label="Joint position (rad)",
-                        plot_height=10,
-                        legends=[name.split("_")[0] for name in self.articulation.dof_names],
-                        show_legend=True,
-                        plot_colors=[
-                            [255, 0, 0],
-                            [0, 255, 0],
-                            [0, 100, 200],
-                        ],  # List of [r,g,b] values; not necessary to specify
-                    )
-
-        self._robot_plots_frame.set_build_fn(build_robot_plots_frame)
-
-
     ######################################################################################
     # Functions Below This Point Support The Provided Example And Can Be Replaced/Deleted
     ######################################################################################
@@ -374,8 +341,6 @@ class UIBuilder:
         self._robot_logs_frame.enabled = False
         self._robot_control_frame.collapsed = True
         self._robot_control_frame.enabled = False
-        self._robot_plots_frame.collapsed = True
-        self._robot_plots_frame.enabled = False
         self._max_joint_velocity_adjustment_menu.visible = False
         self._max_joint_velocity_adjustment_menu.enabled = False
         
@@ -385,8 +350,6 @@ class UIBuilder:
         self._robot_logs_frame.enabled = True
         self._robot_control_frame.collapsed = False
         self._robot_control_frame.enabled = True
-        self._robot_plots_frame.collapsed = False
-        self._robot_plots_frame.enabled = True
         self._max_joint_velocity_adjustment_menu.visible = True
         self._max_joint_velocity_adjustment_menu.enabled = True
 
@@ -411,12 +374,13 @@ class UIBuilder:
         self._enable_articulation()
         self._robot_control_frame.rebuild()
         self._max_joint_velocity_adjustment_menu.rebuild()
-        print(self.articulation.dof_names)
+
         # self.plot.set_legends(legends=[name for name in self.articulation.dof_names])
         # self.plot.set_show_legend(True)
-        self._robot_plots_frame.rebuild()
+        # self._robot_plots_frame.rebuild()
 
     def _setup_max_joint_velocity_frame(self):
+        """ Sets up the max joint velocity frame to use the default max joint velocity defined in the XML file."""
         num_dof = self.articulation.num_dof
         max_joint_velocities = self.articulation.dof_properties["maxVelocity"]
 
@@ -492,9 +456,17 @@ class UIBuilder:
         )
         self.articulation.apply_action(robot_action)
 
+
     def _on_set_max_joint_velocity(self, joint_index: int, max_joint_velocity: float):
-        # TODO: set max joint velocity for the articulation joints
-        pass
+        print("Is it even going here.")
+        
+        if not self.articulation:
+            return
+        
+        self.articulation._articulation_view.set_max_joint_velocities(values=[max_joint_velocity], indices=[joint_index])
+        print(self.articulation._articulation_view.get_joint_max_velocities())
+        self._max_joint_velocity_float_fields[joint_index].set_value(max_joint_velocity)
+
 
     def _on_enable_publish_joint_data(self):
         self.is_publish_joint_data = True
@@ -724,21 +696,5 @@ class UIBuilder:
 
         print("Error:", err)
 
-        # if err <= self._target_tolerance:
-        #     self._reaching = False
-
-    def update_plot(self):
-        if not self.plot or not self.articulation:
-            return
-        
-        t = self._manual_time
-        self.time_history.append(t)
-        joint_positions = self.articulation.get_joint_positions()
-
-        for i, value in enumerate(joint_positions):
-            self.joint_position_history[i].append(value)
-
-        self.plot.set_data(
-            x_data=[self.time_history] * len(self.joint_position_history),
-            y_data=self.joint_position_history
-        )
+        if err < self._target_tolerance:
+            self._reaching = False
